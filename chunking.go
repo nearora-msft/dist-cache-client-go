@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	pb "github.com/nearora/dist-cache-client-go/proto"
+	pb "github.com/nearora-msft/dist-cache-client-go/proto"
 	"golang.org/x/sync/errgroup"
 )
 

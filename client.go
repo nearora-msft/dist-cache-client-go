@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/nearora/dist-cache-client-go/proto"
+	pb "github.com/nearora-msft/dist-cache-client-go/proto"
 )
 
 // Client is a distributed cache client with chunked storage, connection pooling,

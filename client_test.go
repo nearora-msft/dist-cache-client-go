@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/nearora/dist-cache-client-go/proto"
+	pb "github.com/nearora-msft/dist-cache-client-go/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"

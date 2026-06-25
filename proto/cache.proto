@@ -10,7 +10,7 @@ syntax = "proto3";
 
 package cache;
 
-option go_package = "github.com/nearora/dist-cache-client-go/proto";
+option go_package = "github.com/nearora-msft/dist-cache-client-go/proto";
 
 message AuthParams {
   bool enabled = 1;

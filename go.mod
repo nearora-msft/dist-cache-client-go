@@ -1,4 +1,4 @@
-module github.com/nearora/dist-cache-client-go
+module github.com/nearora-msft/dist-cache-client-go
 
 go 1.26.1
 

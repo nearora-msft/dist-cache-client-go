@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/nearora/dist-cache-client-go/proto"
+	pb "github.com/nearora-msft/dist-cache-client-go/proto"
 )
 
 // discovery manages server list resolution and background refresh.

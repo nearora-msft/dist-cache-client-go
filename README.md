@@ -11,13 +11,13 @@ protocol for stampede prevention.
 ## Install
 
 ```bash
-go get github.com/nearora/dist-cache-client-go@latest
+go get github.com/nearora-msft/dist-cache-client-go@latest
 ```
 
 ## Quick start
 
 ```go
-import dcache "github.com/nearora/dist-cache-client-go"
+import dcache "github.com/nearora-msft/dist-cache-client-go"
 
 client, err := dcache.New(
     dcache.WithDiscoveryURL("http://discovery.example.com"),
