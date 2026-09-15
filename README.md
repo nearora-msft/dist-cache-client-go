@@ -51,8 +51,9 @@ Stable entry points consumed by callers:
 Anything not listed above is implementation detail and may change without
 notice.
 
-`WithDNSServer` accepts an IP address or `host:port`; an IP without a port uses
-port 53. If it is omitted, the system resolver is used. DNS logs identify the
+`WithDNSServer` accepts an IPv4 address or `IPv4:port`; an address without a
+port uses port 53. If it is omitted, the system resolver is used. Invalid
+values are rejected during `New`. DNS logs identify the
 selected resolver and report whether cache server hostnames resolved, including
 the selected remote address on a successful connection. Messages use Go's
 standard logger, allowing the hosting process to route them to its configured

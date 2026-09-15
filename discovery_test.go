@@ -35,7 +35,7 @@ func TestDNSResolverEmptyServerReturnsNil(t *testing.T) {
 }
 
 func TestDNSResolverNonEmptyServerReturnsResolver(t *testing.T) {
-	r := dnsResolver("192.0.2.53")
+	r := dnsResolver("192.0.2.53:53")
 	require.NotNil(t, r)
 	assert.True(t, r.PreferGo)
 	assert.NotNil(t, r.Dial)
@@ -56,10 +56,60 @@ func TestWithDNSServerOverridesDefault(t *testing.T) {
 	assert.Equal(t, "192.0.2.53:5353", cfg.dnsServer)
 }
 
-func TestDNSServerNameUsesDefaultPort(t *testing.T) {
-	assert.Equal(t, "192.0.2.53:53", dnsServerName("192.0.2.53"))
-	assert.Equal(t, "192.0.2.53:5353", dnsServerName("192.0.2.53:5353"))
-	assert.Equal(t, "system", dnsServerName(""))
+func TestNewValidatesDNSServer(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		hasErr bool
+	}{
+		{name: "empty uses system resolver", input: "", want: ""},
+		{name: "IPv4 uses port 53", input: "10.0.0.10", want: "10.0.0.10:53"},
+		{name: "IPv4 with port", input: "10.0.0.10:5353", want: "10.0.0.10:5353"},
+		{name: "loopback IPv4", input: "127.0.0.1", want: "127.0.0.1:53"},
+		{name: "URL scheme", input: "udp://10.0.0.10:53", hasErr: true},
+		{name: "empty port", input: "10.0.0.10:", hasErr: true},
+		{name: "nonnumeric port", input: "10.0.0.10:dns", hasErr: true},
+		{name: "signed port", input: "10.0.0.10:+53", hasErr: true},
+		{name: "zero port", input: "10.0.0.10:0", hasErr: true},
+		{name: "negative port", input: "10.0.0.10:-1", hasErr: true},
+		{name: "out of range port", input: "10.0.0.10:65536", hasErr: true},
+		{name: "leading whitespace", input: " 10.0.0.10", hasErr: true},
+		{name: "trailing whitespace", input: "10.0.0.10 ", hasErr: true},
+		{name: "internal whitespace", input: "10.0.0.10: 53", hasErr: true},
+		{name: "hostname", input: "dns.example.com", hasErr: true},
+		{name: "hostname with port", input: "dns.example.com:53", hasErr: true},
+		{name: "malformed IPv4", input: "10.0.0", hasErr: true},
+		{name: "IPv4 octet out of range", input: "10.0.0.256", hasErr: true},
+		{name: "malformed host and port", input: "10.0.0.10:53:54", hasErr: true},
+		{name: "bracketed IPv4", input: "[10.0.0.10]:53", hasErr: true},
+		{name: "IPv6", input: "2001:db8::53", hasErr: true},
+		{name: "bracketed IPv6 with port", input: "[2001:db8::53]:53", hasErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := New(
+				WithServerList([]string{"127.0.0.1:9065"}),
+				WithDNSServer(tt.input),
+			)
+			if tt.hasErr {
+				require.Error(t, err)
+				assert.Nil(t, client)
+				assert.Contains(t, err.Error(), "invalid DNS server")
+				return
+			}
+			require.NoError(t, err)
+			defer client.Close()
+			if tt.want == "" {
+				assert.Equal(t, "system", client.connMgr.dnsServer)
+				assert.Nil(t, client.connMgr.resolver)
+				return
+			}
+			assert.Equal(t, tt.want, client.connMgr.dnsServer)
+			assert.NotNil(t, client.connMgr.resolver)
+		})
+	}
 }
 
 func TestConnPoolDialHonorsCanceledContext(t *testing.T) {
@@ -76,7 +126,7 @@ func TestConnPoolDialHonorsCanceledContext(t *testing.T) {
 		1,
 		time.Minute,
 		0,
-		dnsResolver("192.0.2.53"),
+		dnsResolver("192.0.2.53:53"),
 		"192.0.2.53:53",
 	)
 
@@ -152,10 +202,12 @@ func TestK8sDNSDiscoveryHonorsCanceledContext(t *testing.T) {
 
 	cfg := defaultConfig()
 	cfg.dnsServer = "192.0.2.53"
-	manager := newConnManager(1, time.Minute, 0, dnsResolver(cfg.dnsServer), dnsServerName(cfg.dnsServer))
+	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
+	require.NoError(t, err)
+	manager := newConnManager(1, time.Minute, 0, dnsResolver(dnsEndpoint), dnsEndpoint)
 	d := &discovery{cfg: cfg, connMgr: manager}
 
-	_, err := d.discoverViaK8sDNS(ctx, "cache", "default", defaultPort)
+	_, err = d.discoverViaK8sDNS(ctx, "cache", "default", defaultPort)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)

@@ -74,8 +74,8 @@ func WithK8sDiscovery(service, namespace string) Option {
 }
 
 // WithDNSServer sets the DNS server used to resolve discovery and cache server
-// hostnames. The value may be an IP address or host:port. An empty value uses
-// the system resolver.
+// hostnames. The value may be an IPv4 address or IPv4:port. An empty value
+// uses the system resolver.
 func WithDNSServer(server string) Option {
 	return func(c *clientConfig) { c.dnsServer = server }
 }

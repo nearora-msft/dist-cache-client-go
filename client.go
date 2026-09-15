@@ -46,8 +46,16 @@ func New(opts ...Option) (*Client, error) {
 		o(cfg)
 	}
 
-	resolver := dnsResolver(cfg.dnsServer)
-	connMgr := newConnManager(cfg.maxConnsPerSvr, cfg.dialTimeout, cfg.socketBufSize, resolver, dnsServerName(cfg.dnsServer))
+	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
+	if err != nil {
+		return nil, err
+	}
+	dnsServer := dnsEndpoint
+	if dnsServer == "" {
+		dnsServer = "system"
+	}
+	resolver := dnsResolver(dnsEndpoint)
+	connMgr := newConnManager(cfg.maxConnsPerSvr, cfg.dialTimeout, cfg.socketBufSize, resolver, dnsServer)
 
 	disc, err := newDiscovery(cfg, connMgr, cfg.virtualNodes)
 	if err != nil {

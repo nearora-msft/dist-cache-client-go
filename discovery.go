@@ -256,7 +256,15 @@ func parseServerList(list string) []string {
 // DiscoverServers is a standalone function for discovering servers without creating a full client.
 // Useful for health checks and diagnostics.
 func DiscoverServers(ctx context.Context, cfg *clientConfig) ([]string, error) {
-	cm := newConnManager(2, cfg.dialTimeout, 0, dnsResolver(cfg.dnsServer), dnsServerName(cfg.dnsServer))
+	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
+	if err != nil {
+		return nil, err
+	}
+	dnsServer := dnsEndpoint
+	if dnsServer == "" {
+		dnsServer = "system"
+	}
+	cm := newConnManager(2, cfg.dialTimeout, 0, dnsResolver(dnsEndpoint), dnsServer)
 	defer cm.closeAll()
 
 	d := &discovery{cfg: cfg, connMgr: cm}

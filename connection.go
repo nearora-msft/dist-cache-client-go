@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -330,14 +331,13 @@ func (m *connManager) closeAll() {
 	m.pools = make(map[string]*connPool)
 }
 
-// dnsResolver builds a *net.Resolver that sends all queries to the
-// given DNS server. Returns nil (use the system resolver) when server is empty.
-func dnsResolver(server string) *net.Resolver {
-	if server == "" {
+// dnsResolver builds a *net.Resolver that sends all queries to the given
+// validated endpoint. Returns nil (use the system resolver) when endpoint is empty.
+func dnsResolver(endpoint string) *net.Resolver {
+	if endpoint == "" {
 		return nil
 	}
 
-	endpoint := dnsServerName(server)
 	log.Printf("dcache: custom DNS resolver configured dns_server=%q", endpoint)
 
 	return &net.Resolver{
@@ -348,12 +348,40 @@ func dnsResolver(server string) *net.Resolver {
 	}
 }
 
-func dnsServerName(server string) string {
+func parseDNSServer(server string) (string, error) {
 	if server == "" {
-		return "system"
+		return "", nil
 	}
-	if _, _, err := net.SplitHostPort(server); err == nil {
-		return server
+	if strings.TrimSpace(server) != server {
+		return "", fmt.Errorf("dcache: invalid DNS server %q: whitespace is not allowed", server)
 	}
-	return net.JoinHostPort(strings.Trim(server, "[]"), "53")
+	if strings.ContainsAny(server, "[]") {
+		return "", fmt.Errorf("dcache: invalid DNS server %q: expected IPv4 or IPv4:port", server)
+	}
+
+	if ip := net.ParseIP(server); ip != nil && ip.To4() != nil {
+		return net.JoinHostPort(ip.String(), "53"), nil
+	}
+
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		return "", fmt.Errorf("dcache: invalid DNS server %q: expected IPv4 or IPv4:port", server)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil {
+		return "", fmt.Errorf("dcache: invalid DNS server %q: host must be an IPv4 address", server)
+	}
+	if port == "" {
+		return "", fmt.Errorf("dcache: invalid DNS server %q: port is required after ':'", server)
+	}
+	for _, char := range port {
+		if char < '0' || char > '9' {
+			return "", fmt.Errorf("dcache: invalid DNS server %q: port must be between 1 and 65535", server)
+		}
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return "", fmt.Errorf("dcache: invalid DNS server %q: port must be between 1 and 65535", server)
+	}
+	return net.JoinHostPort(ip.String(), strconv.FormatUint(portNumber, 10)), nil
 }
