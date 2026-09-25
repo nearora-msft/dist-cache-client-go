@@ -9,9 +9,10 @@
 // This module is the temporary home for the SDK. It will move to a permanent
 // upstream location later; the import path will change once at that point.
 //
-// Stable public surface: New, Option/UploadOption/DownloadOption constructors,
-// ChunkError, FileAttr, FileAttrEntry, the Err* sentinels, and
-// IsRecoverableNetErr. Anything else is implementation detail.
+// Stable public surface: New, NewWithContext, DiscoverServers,
+// Option/UploadOption/DownloadOption constructors, ChunkError, FileAttr,
+// FileAttrEntry, the Err* sentinels, and IsRecoverableNetErr. Anything else is
+// implementation detail.
 package dcache
 
 import (

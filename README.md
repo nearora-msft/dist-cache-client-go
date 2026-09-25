@@ -39,6 +39,7 @@ Stable entry points consumed by callers:
 
 - `New(opts ...Option) (*Client, error)`
 - `NewWithContext(ctx context.Context, opts ...Option) (*Client, error)`
+- `DiscoverServers(ctx context.Context, opts ...Option) ([]string, error)`
 - `Option` constructors: `WithDiscoveryURL`, `WithDNSServer`,
   `WithServerList`, `WithPort`, `WithChunkSize`,
   `WithCachePrefix`, `WithMaxConnsPerServer`, `WithDiscoveryRefresh`,

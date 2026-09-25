@@ -23,8 +23,6 @@ type discovery struct {
 	ring    *ConsistentHashRing
 	cfg     *clientConfig
 	connMgr *connManager
-	stopCh  chan struct{}
-	stopped bool
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
@@ -35,7 +33,6 @@ func newDiscovery(ctx context.Context, cfg *clientConfig, connMgr *connManager, 
 		cfg:     cfg,
 		connMgr: connMgr,
 		ring:    NewConsistentHashRing(nil, vnodes),
-		stopCh:  make(chan struct{}),
 		ctx:     refreshCtx,
 		cancel:  cancel,
 	}
@@ -124,7 +121,11 @@ func (d *discovery) discoverViaRPC(ctx context.Context, endpoint string) ([]stri
 		}
 	}()
 
-	if err := c.setDeadline(time.Now().Add(d.cfg.requestTimeout)); err != nil {
+	deadline := time.Now().Add(d.cfg.requestTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := c.setDeadline(deadline); err != nil {
 		d.connMgr.discardConn(c)
 		discarded = true
 		return nil, err
@@ -173,8 +174,6 @@ func (d *discovery) refreshLoop() {
 
 	for {
 		select {
-		case <-d.stopCh:
-			return
 		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
@@ -200,13 +199,7 @@ func (d *discovery) refresh(ctx context.Context) {
 
 // close stops the background refresh loop.
 func (d *discovery) close() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if !d.stopped {
-		d.stopped = true
-		d.cancel()
-		close(d.stopCh)
-	}
+	d.cancel()
 }
 
 // parseServerList splits a comma-separated server list string.
@@ -222,9 +215,13 @@ func parseServerList(list string) []string {
 	return servers
 }
 
-// DiscoverServers is a standalone function for discovering servers without creating a full client.
-// Useful for health checks and diagnostics.
-func DiscoverServers(ctx context.Context, cfg *clientConfig) ([]string, error) {
+// DiscoverServers discovers servers without creating a full client.
+// It is useful for health checks and diagnostics.
+func DiscoverServers(ctx context.Context, opts ...Option) ([]string, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("dcache: nil context")
+	}
+	cfg := configWithOptions(opts)
 	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
 	if err != nil {
 		return nil, err

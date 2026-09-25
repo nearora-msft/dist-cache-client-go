@@ -203,6 +203,78 @@ func TestNewWithContextCancelsInitialDiscovery(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoServers)
 }
 
+func TestDiscoveryCloseIsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &discovery{
+		ctx:    ctx,
+		cancel: cancel,
+		cfg:    &clientConfig{discoveryRefresh: time.Hour},
+	}
+	done := make(chan struct{})
+	go func() {
+		d.refreshLoop()
+		close(done)
+	}()
+
+	d.close()
+	d.close()
+
+	assert.ErrorIs(t, d.ctx.Err(), context.Canceled)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("refresh loop did not stop after discovery closed")
+	}
+}
+
+func TestDiscoverServersWithOptions(t *testing.T) {
+	want := []string{"cache-0.example:9065", "cache-1.example:9065"}
+
+	got, err := DiscoverServers(context.Background(), WithServerList(want))
+
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestDiscoverServersRejectsNilContext(t *testing.T) {
+	servers, err := DiscoverServers(nil, WithServerList([]string{"cache.example:9065"}))
+
+	require.Error(t, err)
+	assert.Nil(t, servers)
+	assert.Contains(t, err.Error(), "nil context")
+}
+
+func TestDiscoverViaRPCUsesCallerDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		nc, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer nc.Close()
+		<-release
+	}()
+
+	cfg := defaultConfig()
+	cfg.requestTimeout = 2 * time.Second
+	manager := newConnManager(1, time.Second, 0, nil)
+	d := &discovery{cfg: cfg, connMgr: manager}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err = d.discoverViaRPC(ctx, listener.Addr().String())
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, 500*time.Millisecond)
+}
+
 // TestDNSResolverRoutesQueriesToConfiguredServer verifies that queries made through
 // the returned resolver are sent to the configured endpoint and not to whatever
 // /etc/resolv.conf specifies.
