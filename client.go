@@ -41,23 +41,38 @@ type Client struct {
 
 // New creates a new distributed cache client.
 func New(opts ...Option) (*Client, error) {
+	cfg := configWithOptions(opts)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.requestTimeout)
+	defer cancel()
+	return newClient(ctx, cfg)
+}
+
+// NewWithContext creates a new distributed cache client using ctx for initial
+// server discovery.
+func NewWithContext(ctx context.Context, opts ...Option) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("dcache: nil context")
+	}
+	return newClient(ctx, configWithOptions(opts))
+}
+
+func configWithOptions(opts []Option) *clientConfig {
 	cfg := defaultConfig()
 	for _, o := range opts {
 		o(cfg)
 	}
+	return cfg
+}
 
+func newClient(ctx context.Context, cfg *clientConfig) (*Client, error) {
 	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
 	if err != nil {
 		return nil, err
 	}
-	dnsServer := dnsEndpoint
-	if dnsServer == "" {
-		dnsServer = "system"
-	}
 	resolver := dnsResolver(dnsEndpoint)
-	connMgr := newConnManager(cfg.maxConnsPerSvr, cfg.dialTimeout, cfg.socketBufSize, resolver, dnsServer)
+	connMgr := newConnManager(cfg.maxConnsPerSvr, cfg.dialTimeout, cfg.socketBufSize, resolver)
 
-	disc, err := newDiscovery(cfg, connMgr, cfg.virtualNodes)
+	disc, err := newDiscovery(ctx, cfg, connMgr, cfg.virtualNodes)
 	if err != nil {
 		connMgr.closeAll()
 		return nil, fmt.Errorf("dcache: discovery: %w", err)

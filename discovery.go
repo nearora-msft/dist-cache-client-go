@@ -5,9 +5,8 @@ package dcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -26,21 +25,28 @@ type discovery struct {
 	connMgr *connManager
 	stopCh  chan struct{}
 	stopped bool
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
-func newDiscovery(cfg *clientConfig, connMgr *connManager, vnodes int) (*discovery, error) {
+func newDiscovery(ctx context.Context, cfg *clientConfig, connMgr *connManager, vnodes int) (*discovery, error) {
+	refreshCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	d := &discovery{
 		cfg:     cfg,
 		connMgr: connMgr,
 		ring:    NewConsistentHashRing(nil, vnodes),
 		stopCh:  make(chan struct{}),
+		ctx:     refreshCtx,
+		cancel:  cancel,
 	}
 
-	servers, err := d.resolveServers(context.Background())
+	servers, err := d.resolveServers(ctx)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if len(servers) == 0 {
+		cancel()
 		return nil, ErrNoServers
 	}
 
@@ -48,7 +54,7 @@ func newDiscovery(cfg *clientConfig, connMgr *connManager, vnodes int) (*discove
 	d.ring.UpdateServers(servers)
 
 	// Start background refresh if using dynamic discovery
-	if cfg.discoveryURL != "" || cfg.k8sService != "" {
+	if cfg.discoveryURL != "" {
 		go d.refreshLoop()
 	}
 
@@ -70,31 +76,28 @@ func (d *discovery) getServers() []string {
 }
 
 // resolveServers determines the server list using the configured discovery method.
-// Priority: discovery URL > K8s DNS > static list > environment variable.
+// Priority: discovery URL > static list > environment variable.
 func (d *discovery) resolveServers(ctx context.Context) ([]string, error) {
+	var discoveryErrs []error
+
 	// 1. Discovery endpoint (GetCacheServers RPC)
 	if d.cfg.discoveryURL != "" {
 		servers, err := d.discoverViaRPC(ctx, d.cfg.discoveryURL)
 		if err == nil && len(servers) > 0 {
 			return servers, nil
 		}
+		if err != nil {
+			discoveryErrs = append(discoveryErrs, fmt.Errorf("discovery RPC %q: %w", d.cfg.discoveryURL, err))
+		}
 		// Fall through to next method on error
 	}
 
-	// 2. Kubernetes DNS (headless StatefulSet)
-	if d.cfg.k8sService != "" && d.cfg.k8sNamespace != "" {
-		servers, err := d.discoverViaK8sDNS(ctx, d.cfg.k8sService, d.cfg.k8sNamespace, d.cfg.port)
-		if err == nil && len(servers) > 0 {
-			return servers, nil
-		}
-	}
-
-	// 3. Static server list from config
+	// 2. Static server list from config
 	if len(d.cfg.servers) > 0 {
 		return d.cfg.servers, nil
 	}
 
-	// 4. Environment variable
+	// 3. Environment variable
 	if envList := os.Getenv("DIST_CACHE_SERVER_LIST"); envList != "" {
 		servers := parseServerList(envList)
 		if len(servers) > 0 {
@@ -102,6 +105,9 @@ func (d *discovery) resolveServers(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	if len(discoveryErrs) > 0 {
+		return nil, errors.Join(append([]error{ErrNoServers}, discoveryErrs...)...)
+	}
 	return nil, ErrNoServers
 }
 
@@ -160,48 +166,6 @@ func (d *discovery) discoverViaRPC(ctx context.Context, endpoint string) ([]stri
 	return servers, nil
 }
 
-// discoverViaK8sDNS resolves servers from a Kubernetes headless StatefulSet service.
-// DNS pattern: cacheserver-{N}.{service}.{namespace}.svc.cluster.local
-func (d *discovery) discoverViaK8sDNS(ctx context.Context, service, namespace string, port int) ([]string, error) {
-	resolver := d.connMgr.resolver
-	if resolver == nil {
-		resolver = net.DefaultResolver
-	}
-
-	// Try SRV record first for the headless service
-	svcDNS := fmt.Sprintf("%s.%s.svc.cluster.local", service, namespace)
-	_, addrs, err := resolver.LookupSRV(ctx, "", "", svcDNS)
-	if err == nil && len(addrs) > 0 {
-		servers := serversFromSRV(addrs)
-		log.Printf("dcache: cache server addresses resolved host=%q addresses=%v dns_server=%q", svcDNS, servers, d.connMgr.dnsServer)
-		return servers, nil
-	}
-
-	// Fall back to A record lookup
-	ips, err := resolver.LookupHost(ctx, svcDNS)
-	if err != nil {
-		log.Printf("dcache: cache server address resolution failed host=%q dns_server=%q error=%v", svcDNS, d.connMgr.dnsServer, err)
-		return nil, fmt.Errorf("k8s DNS lookup %s: %w", svcDNS, err)
-	}
-
-	servers := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		servers = append(servers, fmt.Sprintf("%s:%d", ip, port))
-	}
-	sort.Strings(servers)
-	log.Printf("dcache: cache server addresses resolved host=%q addresses=%v dns_server=%q", svcDNS, servers, d.connMgr.dnsServer)
-	return servers, nil
-}
-
-func serversFromSRV(addrs []*net.SRV) []string {
-	servers := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		servers = append(servers, fmt.Sprintf("%s:%d", strings.TrimSuffix(addr.Target, "."), addr.Port))
-	}
-	sort.Strings(servers)
-	return servers
-}
-
 // refreshLoop periodically re-discovers the server list.
 func (d *discovery) refreshLoop() {
 	ticker := time.NewTicker(d.cfg.discoveryRefresh)
@@ -211,8 +175,12 @@ func (d *discovery) refreshLoop() {
 		select {
 		case <-d.stopCh:
 			return
+		case <-d.ctx.Done():
+			return
 		case <-ticker.C:
-			d.refresh(context.Background())
+			ctx, cancel := context.WithTimeout(d.ctx, d.cfg.requestTimeout)
+			d.refresh(ctx)
+			cancel()
 		}
 	}
 }
@@ -236,6 +204,7 @@ func (d *discovery) close() {
 	defer d.mu.Unlock()
 	if !d.stopped {
 		d.stopped = true
+		d.cancel()
 		close(d.stopCh)
 	}
 }
@@ -260,11 +229,7 @@ func DiscoverServers(ctx context.Context, cfg *clientConfig) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	dnsServer := dnsEndpoint
-	if dnsServer == "" {
-		dnsServer = "system"
-	}
-	cm := newConnManager(2, cfg.dialTimeout, 0, dnsResolver(dnsEndpoint), dnsServer)
+	cm := newConnManager(2, cfg.dialTimeout, 0, dnsResolver(dnsEndpoint))
 	defer cm.closeAll()
 
 	d := &discovery{cfg: cfg, connMgr: cm}

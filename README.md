@@ -38,8 +38,9 @@ defer client.Close()
 Stable entry points consumed by callers:
 
 - `New(opts ...Option) (*Client, error)`
-- `Option` constructors: `WithDiscoveryURL`, `WithK8sDiscovery`,
-  `WithDNSServer`, `WithServerList`, `WithPort`, `WithChunkSize`,
+- `NewWithContext(ctx context.Context, opts ...Option) (*Client, error)`
+- `Option` constructors: `WithDiscoveryURL`, `WithDNSServer`,
+  `WithServerList`, `WithPort`, `WithChunkSize`,
   `WithCachePrefix`, `WithMaxConnsPerServer`, `WithDiscoveryRefresh`,
   `WithChecksumVerification`
 - Per-call options: `UploadOption` (`WithIgnoreLock`, `WithGroupID`,
@@ -53,11 +54,18 @@ notice.
 
 `WithDNSServer` accepts an IPv4 address or `IPv4:port`; an address without a
 port uses port 53. If it is omitted, the system resolver is used. Invalid
-values are rejected during `New`. DNS logs identify the
-selected resolver and report whether cache server hostnames resolved, including
-the selected remote address on a successful connection. Messages use Go's
-standard logger, allowing the hosting process to route them to its configured
-log destination.
+values are rejected during `New`. DNS and connection errors include the cache
+server and wrap the underlying network error so callers can classify and log
+failures using their own logging policy.
+
+`NewWithContext` allows callers to cancel or bound initial server discovery.
+`New` remains available for compatibility and bounds discovery with the
+configured request timeout.
+
+Server discovery supports an authoritative discovery endpoint or a static
+server list. Kubernetes service/namespace discovery is intentionally unsupported
+because Service endpoints reflect temporary pod availability rather than cache
+ring membership.
 
 ## Regenerating protobufs
 

@@ -7,10 +7,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -149,10 +147,9 @@ type connPool struct {
 	dialTO    time.Duration
 	sockBufSz int // SO_RCVBUF/SO_SNDBUF size (0 = system default)
 	resolver  *net.Resolver
-	dnsServer string
 }
 
-func newConnPool(addr string, maxConns int, dialTimeout time.Duration, sockBufSize int, resolver *net.Resolver, dnsServer string) *connPool {
+func newConnPool(addr string, maxConns int, dialTimeout time.Duration, sockBufSize int, resolver *net.Resolver) *connPool {
 	return &connPool{
 		addr:      addr,
 		conns:     make([]*conn, 0, maxConns),
@@ -160,7 +157,6 @@ func newConnPool(addr string, maxConns int, dialTimeout time.Duration, sockBufSi
 		dialTO:    dialTimeout,
 		sockBufSz: sockBufSize,
 		resolver:  resolver,
-		dnsServer: dnsServer,
 	}
 }
 
@@ -208,26 +204,10 @@ func (p *connPool) dial(ctx context.Context) (*conn, error) {
 	}
 	defer cancel()
 
-	var hostname string
-	if host, _, err := net.SplitHostPort(p.addr); err == nil && net.ParseIP(host) == nil {
-		hostname = host
-	}
-
 	dialer := net.Dialer{Timeout: p.dialTO, Resolver: p.resolver}
 	nc, err := dialer.DialContext(ctx, "tcp", p.addr)
 	if err != nil {
-		if hostname != "" {
-			var dnsErr *net.DNSError
-			if errors.As(err, &dnsErr) {
-				log.Printf("dcache: cache server address resolution failed host=%q dns_server=%q error=%v", hostname, p.dnsServer, dnsErr)
-			} else {
-				log.Printf("dcache: cache server connection failed host=%q dns_server=%q error=%v", hostname, p.dnsServer, err)
-			}
-		}
-		return nil, fmt.Errorf("%w: %s: %w", ErrConnectionFailed, p.addr, err)
-	}
-	if hostname != "" {
-		log.Printf("dcache: cache server address resolved host=%q remote_address=%q dns_server=%q", hostname, nc.RemoteAddr(), p.dnsServer)
+		return nil, fmt.Errorf("%w: dial cache server %q: %w", ErrConnectionFailed, p.addr, err)
 	}
 
 	if tc, ok := nc.(*net.TCPConn); ok {
@@ -267,17 +247,15 @@ type connManager struct {
 	dialTO    time.Duration
 	sockBufSz int
 	resolver  *net.Resolver
-	dnsServer string
 }
 
-func newConnManager(maxConnsPerServer int, dialTimeout time.Duration, sockBufSize int, resolver *net.Resolver, dnsServer string) *connManager {
+func newConnManager(maxConnsPerServer int, dialTimeout time.Duration, sockBufSize int, resolver *net.Resolver) *connManager {
 	return &connManager{
 		pools:     make(map[string]*connPool),
 		maxConns:  maxConnsPerServer,
 		dialTO:    dialTimeout,
 		sockBufSz: sockBufSize,
 		resolver:  resolver,
-		dnsServer: dnsServer,
 	}
 }
 
@@ -291,7 +269,7 @@ func (m *connManager) getConn(ctx context.Context, addr string) (*conn, error) {
 		m.mu.Lock()
 		pool, ok = m.pools[addr]
 		if !ok {
-			pool = newConnPool(addr, m.maxConns, m.dialTO, m.sockBufSz, m.resolver, m.dnsServer)
+			pool = newConnPool(addr, m.maxConns, m.dialTO, m.sockBufSz, m.resolver)
 			m.pools[addr] = pool
 		}
 		m.mu.Unlock()
@@ -337,8 +315,6 @@ func dnsResolver(endpoint string) *net.Resolver {
 	if endpoint == "" {
 		return nil
 	}
-
-	log.Printf("dcache: custom DNS resolver configured dns_server=%q", endpoint)
 
 	return &net.Resolver{
 		PreferGo: true,

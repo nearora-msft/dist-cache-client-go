@@ -22,8 +22,6 @@ const (
 type clientConfig struct {
 	servers          []string
 	discoveryURL     string
-	k8sService       string
-	k8sNamespace     string
 	dnsServer        string
 	port             int
 	chunkSize        int64
@@ -63,14 +61,6 @@ func WithServerList(servers []string) Option {
 // WithDiscoveryURL sets the discovery endpoint for dynamic server list refresh.
 func WithDiscoveryURL(url string) Option {
 	return func(c *clientConfig) { c.discoveryURL = url }
-}
-
-// WithK8sDiscovery sets Kubernetes headless service discovery parameters.
-func WithK8sDiscovery(service, namespace string) Option {
-	return func(c *clientConfig) {
-		c.k8sService = service
-		c.k8sNamespace = namespace
-	}
 }
 
 // WithDNSServer sets the DNS server used to resolve discovery and cache server
