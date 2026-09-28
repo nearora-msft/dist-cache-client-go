@@ -9,9 +9,10 @@
 // This module is the temporary home for the SDK. It will move to a permanent
 // upstream location later; the import path will change once at that point.
 //
-// Stable public surface: New, Option/UploadOption/DownloadOption constructors,
-// ChunkError, FileAttr, FileAttrEntry, the Err* sentinels, and
-// IsRecoverableNetErr. Anything else is implementation detail.
+// Stable public surface: New, NewWithContext, DiscoverServers,
+// Option/UploadOption/DownloadOption constructors, ChunkError, FileAttr,
+// FileAttrEntry, the Err* sentinels, and IsRecoverableNetErr. Anything else is
+// implementation detail.
 package dcache
 
 import (
@@ -41,14 +42,38 @@ type Client struct {
 
 // New creates a new distributed cache client.
 func New(opts ...Option) (*Client, error) {
+	cfg := configWithOptions(opts)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.requestTimeout)
+	defer cancel()
+	return newClient(ctx, cfg)
+}
+
+// NewWithContext creates a new distributed cache client using ctx for initial
+// server discovery.
+func NewWithContext(ctx context.Context, opts ...Option) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("dcache: nil context")
+	}
+	return newClient(ctx, configWithOptions(opts))
+}
+
+func configWithOptions(opts []Option) *clientConfig {
 	cfg := defaultConfig()
 	for _, o := range opts {
 		o(cfg)
 	}
+	return cfg
+}
 
-	connMgr := newConnManager(cfg.maxConnsPerSvr, cfg.dialTimeout, cfg.socketBufSize)
+func newClient(ctx context.Context, cfg *clientConfig) (*Client, error) {
+	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
+	if err != nil {
+		return nil, err
+	}
+	resolver := dnsResolver(dnsEndpoint)
+	connMgr := newConnManager(cfg.maxConnsPerSvr, cfg.dialTimeout, cfg.socketBufSize, resolver)
 
-	disc, err := newDiscovery(cfg, connMgr, cfg.virtualNodes)
+	disc, err := newDiscovery(ctx, cfg, connMgr, cfg.virtualNodes)
 	if err != nil {
 		connMgr.closeAll()
 		return nil, fmt.Errorf("dcache: discovery: %w", err)
@@ -264,7 +289,7 @@ func (c *Client) GetChunkGroupID(ctx context.Context, filename, etag string) ([]
 		return nil, err
 	}
 
-	cn, err := c.connMgr.getConn(server)
+	cn, err := c.connMgr.getConn(ctx, server)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +404,7 @@ func (c *Client) DeleteGroup(ctx context.Context, groupID []byte) error {
 	// Group delete must be sent to all servers
 	servers := c.disc.getServers()
 	for _, server := range servers {
-		cn, err := c.connMgr.getConn(server)
+		cn, err := c.connMgr.getConn(ctx, server)
 		if err != nil {
 			continue // best-effort
 		}
@@ -426,7 +451,7 @@ func (c *Client) GetAttr(ctx context.Context, filename string) (*FileAttr, error
 		return nil, err
 	}
 
-	cn, err := c.connMgr.getConn(server)
+	cn, err := c.connMgr.getConn(ctx, server)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +531,7 @@ func (c *Client) PutAttr(ctx context.Context, attrs []FileAttrEntry) error {
 
 	// Send to each server
 	for server, faList := range serverAttrs {
-		cn, err := c.connMgr.getConn(server)
+		cn, err := c.connMgr.getConn(ctx, server)
 		if err != nil {
 			return err
 		}
@@ -569,7 +594,7 @@ func (c *Client) Servers() []string {
 // --- Internal helpers ---
 
 func (c *Client) deleteKey(ctx context.Context, cacheKey, server string) error {
-	cn, err := c.connMgr.getConn(server)
+	cn, err := c.connMgr.getConn(ctx, server)
 	if err != nil {
 		return err
 	}

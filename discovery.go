@@ -5,8 +5,8 @@ package dcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -23,23 +23,27 @@ type discovery struct {
 	ring    *ConsistentHashRing
 	cfg     *clientConfig
 	connMgr *connManager
-	stopCh  chan struct{}
-	stopped bool
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
-func newDiscovery(cfg *clientConfig, connMgr *connManager, vnodes int) (*discovery, error) {
+func newDiscovery(ctx context.Context, cfg *clientConfig, connMgr *connManager, vnodes int) (*discovery, error) {
+	refreshCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	d := &discovery{
 		cfg:     cfg,
 		connMgr: connMgr,
 		ring:    NewConsistentHashRing(nil, vnodes),
-		stopCh:  make(chan struct{}),
+		ctx:     refreshCtx,
+		cancel:  cancel,
 	}
 
-	servers, err := d.resolveServers()
+	servers, err := d.resolveServers(ctx)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if len(servers) == 0 {
+		cancel()
 		return nil, ErrNoServers
 	}
 
@@ -47,7 +51,7 @@ func newDiscovery(cfg *clientConfig, connMgr *connManager, vnodes int) (*discove
 	d.ring.UpdateServers(servers)
 
 	// Start background refresh if using dynamic discovery
-	if cfg.discoveryURL != "" || cfg.k8sService != "" {
+	if cfg.discoveryURL != "" {
 		go d.refreshLoop()
 	}
 
@@ -69,31 +73,28 @@ func (d *discovery) getServers() []string {
 }
 
 // resolveServers determines the server list using the configured discovery method.
-// Priority: discovery URL > K8s DNS > static list > environment variable.
-func (d *discovery) resolveServers() ([]string, error) {
+// Priority: discovery URL > static list > environment variable.
+func (d *discovery) resolveServers(ctx context.Context) ([]string, error) {
+	var discoveryErrs []error
+
 	// 1. Discovery endpoint (GetCacheServers RPC)
 	if d.cfg.discoveryURL != "" {
-		servers, err := d.discoverViaRPC(d.cfg.discoveryURL)
+		servers, err := d.discoverViaRPC(ctx, d.cfg.discoveryURL)
 		if err == nil && len(servers) > 0 {
 			return servers, nil
+		}
+		if err != nil {
+			discoveryErrs = append(discoveryErrs, fmt.Errorf("discovery RPC %q: %w", d.cfg.discoveryURL, err))
 		}
 		// Fall through to next method on error
 	}
 
-	// 2. Kubernetes DNS (headless StatefulSet)
-	if d.cfg.k8sService != "" && d.cfg.k8sNamespace != "" {
-		servers, err := d.discoverViaK8sDNS(d.cfg.k8sService, d.cfg.k8sNamespace, d.cfg.port)
-		if err == nil && len(servers) > 0 {
-			return servers, nil
-		}
-	}
-
-	// 3. Static server list from config
+	// 2. Static server list from config
 	if len(d.cfg.servers) > 0 {
 		return d.cfg.servers, nil
 	}
 
-	// 4. Environment variable
+	// 3. Environment variable
 	if envList := os.Getenv("DIST_CACHE_SERVER_LIST"); envList != "" {
 		servers := parseServerList(envList)
 		if len(servers) > 0 {
@@ -101,12 +102,15 @@ func (d *discovery) resolveServers() ([]string, error) {
 		}
 	}
 
+	if len(discoveryErrs) > 0 {
+		return nil, errors.Join(append([]error{ErrNoServers}, discoveryErrs...)...)
+	}
 	return nil, ErrNoServers
 }
 
 // discoverViaRPC connects to the discovery endpoint and calls GetCacheServers.
-func (d *discovery) discoverViaRPC(endpoint string) ([]string, error) {
-	c, err := d.connMgr.getConn(endpoint)
+func (d *discovery) discoverViaRPC(ctx context.Context, endpoint string) ([]string, error) {
+	c, err := d.connMgr.getConn(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +121,11 @@ func (d *discovery) discoverViaRPC(endpoint string) ([]string, error) {
 		}
 	}()
 
-	if err := c.setDeadline(time.Now().Add(d.cfg.requestTimeout)); err != nil {
+	deadline := time.Now().Add(d.cfg.requestTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := c.setDeadline(deadline); err != nil {
 		d.connMgr.discardConn(c)
 		discarded = true
 		return nil, err
@@ -159,39 +167,6 @@ func (d *discovery) discoverViaRPC(endpoint string) ([]string, error) {
 	return servers, nil
 }
 
-// discoverViaK8sDNS resolves servers from a Kubernetes headless StatefulSet service.
-// DNS pattern: cacheserver-{N}.{service}.{namespace}.svc.cluster.local
-func (d *discovery) discoverViaK8sDNS(service, namespace string, port int) ([]string, error) {
-	// Try SRV record first for the headless service
-	svcDNS := fmt.Sprintf("%s.%s.svc.cluster.local", service, namespace)
-	_, addrs, err := net.LookupSRV("", "", svcDNS)
-	if err == nil && len(addrs) > 0 {
-		return serversFromSRV(addrs), nil
-	}
-
-	// Fall back to A record lookup
-	ips, err := net.LookupHost(svcDNS)
-	if err != nil {
-		return nil, fmt.Errorf("k8s DNS lookup %s: %w", svcDNS, err)
-	}
-
-	servers := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		servers = append(servers, fmt.Sprintf("%s:%d", ip, port))
-	}
-	sort.Strings(servers)
-	return servers, nil
-}
-
-func serversFromSRV(addrs []*net.SRV) []string {
-	servers := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		servers = append(servers, fmt.Sprintf("%s:%d", strings.TrimSuffix(addr.Target, "."), addr.Port))
-	}
-	sort.Strings(servers)
-	return servers
-}
-
 // refreshLoop periodically re-discovers the server list.
 func (d *discovery) refreshLoop() {
 	ticker := time.NewTicker(d.cfg.discoveryRefresh)
@@ -199,16 +174,18 @@ func (d *discovery) refreshLoop() {
 
 	for {
 		select {
-		case <-d.stopCh:
+		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
-			d.refresh()
+			ctx, cancel := context.WithTimeout(d.ctx, d.cfg.requestTimeout)
+			d.refresh(ctx)
+			cancel()
 		}
 	}
 }
 
-func (d *discovery) refresh() {
-	servers, err := d.resolveServers()
+func (d *discovery) refresh(ctx context.Context) {
+	servers, err := d.resolveServers(ctx)
 	if err != nil || len(servers) == 0 {
 		return // keep existing servers on refresh failure
 	}
@@ -222,12 +199,7 @@ func (d *discovery) refresh() {
 
 // close stops the background refresh loop.
 func (d *discovery) close() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if !d.stopped {
-		d.stopped = true
-		close(d.stopCh)
-	}
+	d.cancel()
 }
 
 // parseServerList splits a comma-separated server list string.
@@ -243,12 +215,20 @@ func parseServerList(list string) []string {
 	return servers
 }
 
-// DiscoverServers is a standalone function for discovering servers without creating a full client.
-// Useful for health checks and diagnostics.
-func DiscoverServers(ctx context.Context, cfg *clientConfig) ([]string, error) {
-	cm := newConnManager(2, cfg.dialTimeout, 0)
+// DiscoverServers discovers servers without creating a full client.
+// It is useful for health checks and diagnostics.
+func DiscoverServers(ctx context.Context, opts ...Option) ([]string, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("dcache: nil context")
+	}
+	cfg := configWithOptions(opts)
+	dnsEndpoint, err := parseDNSServer(cfg.dnsServer)
+	if err != nil {
+		return nil, err
+	}
+	cm := newConnManager(2, cfg.dialTimeout, 0, dnsResolver(dnsEndpoint))
 	defer cm.closeAll()
 
 	d := &discovery{cfg: cfg, connMgr: cm}
-	return d.resolveServers()
+	return d.resolveServers(ctx)
 }

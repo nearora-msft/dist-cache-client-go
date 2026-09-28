@@ -21,6 +21,8 @@ import dcache "github.com/nearora-msft/dist-cache-client-go"
 
 client, err := dcache.New(
     dcache.WithDiscoveryURL("http://discovery.example.com"),
+    // Optional: route cache hostname lookups through this caller-provided DNS server.
+    dcache.WithDNSServer("192.0.2.53:53"),
     dcache.WithChunkSize(16 * 1024 * 1024),
     // Store and validate a CRC32 checksum for every chunk.
     dcache.WithChecksumVerification(true),
@@ -36,9 +38,12 @@ defer client.Close()
 Stable entry points consumed by callers:
 
 - `New(opts ...Option) (*Client, error)`
-- `Option` constructors: `WithDiscoveryURL`, `WithK8sDiscovery`,
-  `WithServerList`, `WithPort`, `WithChunkSize`, `WithAuth`, `WithCachePrefix`,
-    `WithMaxConnsPerServer`, `WithDiscoveryRefresh`, `WithChecksumVerification`
+- `NewWithContext(ctx context.Context, opts ...Option) (*Client, error)`
+- `DiscoverServers(ctx context.Context, opts ...Option) ([]string, error)`
+- `Option` constructors: `WithDiscoveryURL`, `WithDNSServer`,
+  `WithServerList`, `WithPort`, `WithChunkSize`,
+  `WithCachePrefix`, `WithMaxConnsPerServer`, `WithDiscoveryRefresh`,
+  `WithChecksumVerification`
 - Per-call options: `UploadOption` (`WithIgnoreLock`, `WithGroupID`,
   `WithMetadata`, `WithTTL`), `DownloadOption` (`WithLock`)
 - Result/error types: `ChunkError`, `FileAttr`, `FileAttrEntry`,
@@ -47,6 +52,21 @@ Stable entry points consumed by callers:
 
 Anything not listed above is implementation detail and may change without
 notice.
+
+`WithDNSServer` accepts an IPv4 address or `IPv4:port`; an address without a
+port uses port 53. If it is omitted, the system resolver is used. Invalid
+values are rejected during `New`. DNS and connection errors include the cache
+server and wrap the underlying network error so callers can classify and log
+failures using their own logging policy.
+
+`NewWithContext` allows callers to cancel or bound initial server discovery.
+`New` remains available for compatibility and bounds discovery with the
+configured request timeout.
+
+Server discovery supports an authoritative discovery endpoint or a static
+server list. Kubernetes service/namespace discovery is intentionally unsupported
+because Service endpoints reflect temporary pod availability rather than cache
+ring membership.
 
 ## Regenerating protobufs
 

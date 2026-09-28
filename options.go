@@ -22,8 +22,7 @@ const (
 type clientConfig struct {
 	servers          []string
 	discoveryURL     string
-	k8sService       string
-	k8sNamespace     string
+	dnsServer        string
 	port             int
 	chunkSize        int64
 	cachePrefix      string
@@ -64,12 +63,11 @@ func WithDiscoveryURL(url string) Option {
 	return func(c *clientConfig) { c.discoveryURL = url }
 }
 
-// WithK8sDiscovery sets Kubernetes headless service discovery parameters.
-func WithK8sDiscovery(service, namespace string) Option {
-	return func(c *clientConfig) {
-		c.k8sService = service
-		c.k8sNamespace = namespace
-	}
+// WithDNSServer sets the DNS server used to resolve discovery and cache server
+// hostnames. The value may be an IPv4 address or IPv4:port. An empty value
+// uses the system resolver.
+func WithDNSServer(server string) Option {
+	return func(c *clientConfig) { c.dnsServer = server }
 }
 
 // WithPort sets the fallback server port (default 9065).

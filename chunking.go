@@ -123,7 +123,7 @@ func (c *Client) uploadChunked(ctx context.Context, filePath, etag string, r io.
 
 // uploadSingleChunk uploads one chunk to the designated server.
 func (c *Client) uploadSingleChunk(ctx context.Context, plan chunkPlan, data []byte, ucfg *uploadConfig) error {
-	cn, err := c.connMgr.getConn(plan.serverAddr)
+	cn, err := c.connMgr.getConn(ctx, plan.serverAddr)
 	if err != nil {
 		return err
 	}
@@ -301,7 +301,7 @@ func (c *Client) downloadChunked(ctx context.Context, filePath, etag string, fil
 // downloadSingleChunkToWriter downloads one chunk directly to a writer.
 // Enables splice(2) when w is *os.File.
 func (c *Client) downloadSingleChunkToWriter(ctx context.Context, plan chunkPlan, w io.Writer, dcfg *downloadConfig) (*FileMetadata, error) {
-	cn, err := c.connMgr.getConn(plan.serverAddr)
+	cn, err := c.connMgr.getConn(ctx, plan.serverAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +354,7 @@ func (c *Client) downloadSingleChunkToWriter(ctx context.Context, plan chunkPlan
 
 // downloadSingleChunkToBuffer downloads one chunk into a buffer.
 func (c *Client) downloadSingleChunkToBuffer(ctx context.Context, plan chunkPlan, buf []byte, dcfg *downloadConfig) (int, map[string][]byte, error) {
-	cn, err := c.connMgr.getConn(plan.serverAddr)
+	cn, err := c.connMgr.getConn(ctx, plan.serverAddr)
 	if err != nil {
 		return 0, nil, err
 	}
