@@ -63,6 +63,13 @@ failures using their own logging policy.
 `New` remains available for compatibility and bounds discovery with the
 configured request timeout.
 
+When a discovery endpoint is configured, cache unavailability at startup is not
+fatal: `New` returns a client with no servers and the background discovery
+refresh (`WithDiscoveryRefresh`) adds servers once they become available. Until
+then, operations return `ErrNoServers`, which `IsRecoverableNetErr` reports as
+recoverable so callers can fall back to their storage path. Invalid options and
+caller cancellation still fail `New`, as does an empty static server list.
+
 Server discovery supports an authoritative discovery endpoint or a static
 server list. Kubernetes service/namespace discovery is intentionally unsupported
 because Service endpoints reflect temporary pod availability rather than cache
