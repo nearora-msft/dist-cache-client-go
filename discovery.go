@@ -38,17 +38,22 @@ func newDiscovery(ctx context.Context, cfg *clientConfig, connMgr *connManager, 
 	}
 
 	servers, err := d.resolveServers(ctx)
+	if err == nil && len(servers) == 0 {
+		err = ErrNoServers
+	}
 	if err != nil {
-		cancel()
-		return nil, err
+		// With a discovery endpoint, cache unavailability at startup is not
+		// fatal: start with an empty ring and let the refresh loop populate it.
+		// Operations return ErrNoServers until then. Caller cancellation and
+		// static/env server lists still fail.
+		if cfg.discoveryURL == "" || errors.Is(ctx.Err(), context.Canceled) {
+			cancel()
+			return nil, err
+		}
+	} else {
+		d.servers = servers
+		d.ring.UpdateServers(servers)
 	}
-	if len(servers) == 0 {
-		cancel()
-		return nil, ErrNoServers
-	}
-
-	d.servers = servers
-	d.ring.UpdateServers(servers)
 
 	// Start background refresh if using dynamic discovery
 	if cfg.discoveryURL != "" {
