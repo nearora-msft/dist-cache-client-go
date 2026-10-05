@@ -36,7 +36,14 @@ type mockServer struct {
 
 func newMockServer(t *testing.T) *mockServer {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	return newMockServerAt(t, "127.0.0.1:0", nil)
+}
+
+// newMockServerAt starts a mock server on addr. handler, if non-nil, is set
+// before serving starts.
+func newMockServerAt(t *testing.T, addr string, handler func(req *pb.Request, data []byte) (proto.Message, []byte)) *mockServer {
+	t.Helper()
+	l, err := net.Listen("tcp", addr)
 	require.NoError(t, err)
 
 	s := &mockServer{
@@ -46,6 +53,7 @@ func newMockServer(t *testing.T) *mockServer {
 		metadata: make(map[string]map[string][]byte),
 		attrs:    make(map[string]*pb.FileAttribute),
 		locks:    make(map[string]bool),
+		handler:  handler,
 	}
 
 	go s.serve()
@@ -509,4 +517,73 @@ func TestConnectionPoolReuse(t *testing.T) {
 		err := client.UploadChunk(ctx, "reuse-test", "", 0, data)
 		require.NoError(t, err)
 	}
+}
+
+// reserveAddr returns a loopback address with nothing listening on it.
+func reserveAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	return addr
+}
+
+func TestNewWithDiscoveryURLStartsWhenCacheUnavailable(t *testing.T) {
+	addr := reserveAddr(t)
+
+	c, err := New(
+		WithDiscoveryURL(addr),
+		WithCachePrefix("test"),
+		WithDialTimeout(200*time.Millisecond),
+		WithRequestTimeout(time.Second),
+		WithDiscoveryRefresh(50*time.Millisecond),
+	)
+	require.NoError(t, err)
+	defer c.Close()
+
+	assert.Empty(t, c.Servers())
+	ctx := context.Background()
+	_, err = c.DownloadChunk(ctx, "file.bin", "", 0, make([]byte, 16))
+	assert.ErrorIs(t, err, ErrNoServers)
+	assert.True(t, IsRecoverableNetErr(err))
+	assert.ErrorIs(t, c.UploadChunk(ctx, "file.bin", "", 0, []byte("data")), ErrNoServers)
+
+	// Cache becomes available: the refresh loop picks it up without a new client.
+	srv := newMockServerAt(t, addr, nil)
+	defer srv.close()
+	require.Eventually(t, func() bool {
+		return len(c.Servers()) == 1 && c.Servers()[0] == addr
+	}, 3*time.Second, 20*time.Millisecond)
+
+	data := []byte("recovered")
+	require.NoError(t, c.UploadChunk(ctx, "file.bin", "", 0, data))
+	buf := make([]byte, len(data))
+	n, err := c.DownloadChunk(ctx, "file.bin", "", 0, buf)
+	require.NoError(t, err)
+	assert.Equal(t, data, buf[:n])
+}
+
+func TestNewWithDiscoveryURLStartsWhenDiscoveryReturnsNoServers(t *testing.T) {
+	srv := newMockServerAt(t, "127.0.0.1:0", func(req *pb.Request, _ []byte) (proto.Message, []byte) {
+		return &pb.GetCacheServersResponse{Result: pb.GetCacheServersResponse_SUCCESS}, nil
+	})
+	defer srv.close()
+
+	c, err := New(WithDiscoveryURL(srv.addr), WithCachePrefix("test"))
+	require.NoError(t, err)
+	defer c.Close()
+
+	assert.Empty(t, c.Servers())
+	_, err = c.DownloadChunk(context.Background(), "file.bin", "", 0, make([]byte, 16))
+	assert.ErrorIs(t, err, ErrNoServers)
+}
+
+func TestNewWithoutDiscoveryURLFailsWithoutServers(t *testing.T) {
+	t.Setenv("DIST_CACHE_SERVER_LIST", "")
+
+	c, err := New(WithCachePrefix("test"))
+	require.Error(t, err)
+	assert.Nil(t, c)
+	assert.ErrorIs(t, err, ErrNoServers)
 }

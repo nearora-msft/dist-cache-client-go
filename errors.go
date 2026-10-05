@@ -36,7 +36,7 @@ func IsRecoverableNetErr(err error) bool {
 	}
 
 	// Check for connection-related sentinel errors
-	if errors.Is(err, ErrConnectionFailed) {
+	if errors.Is(err, ErrConnectionFailed) || errors.Is(err, ErrNoServers) {
 		return true
 	}
 
