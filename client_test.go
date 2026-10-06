@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ type mockServer struct {
 	locks    map[string]bool // cacheKey -> locked
 	handler  func(req *pb.Request, data []byte) (proto.Message, []byte)
 	closed   bool
+	accepted atomic.Int64
 }
 
 func newMockServer(t *testing.T) *mockServer {
@@ -66,6 +68,7 @@ func (s *mockServer) serve() {
 		if err != nil {
 			return
 		}
+		s.accepted.Add(1)
 		go s.handleConn(conn)
 	}
 }
@@ -357,6 +360,112 @@ func TestUploadDownloadChunk(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 4096, n)
 	assert.Equal(t, data, buf[:n])
+}
+
+func TestDownloadChunkRejectsUnexpectedResponseSize(t *testing.T) {
+	tests := []struct {
+		name         string
+		responseData []byte
+	}{
+		{name: "short", responseData: []byte("1234")},
+		{name: "empty", responseData: nil},
+		{name: "oversized", responseData: []byte("123456789012")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newMockServerAt(t, "127.0.0.1:0", func(_ *pb.Request, _ []byte) (proto.Message, []byte) {
+				return &pb.DownloadResponse{
+					Result:   pb.DownloadResponse_SUCCESS,
+					Filesize: uint64(len(tt.responseData)),
+				}, tt.responseData
+			})
+			defer srv.close()
+			client := newTestClient(t, srv)
+
+			_, err := client.DownloadChunk(context.Background(), "file.bin", "", 0, make([]byte, 8))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "unexpected chunk size: expected 8")
+		})
+	}
+}
+
+func TestDownloadChunkDiscardsConnectionAfterUnexpectedSize(t *testing.T) {
+	expectedData := []byte("12345678")
+	var mu sync.Mutex
+	callCount := 0
+
+	srv := newMockServerAt(t, "127.0.0.1:0", func(_ *pb.Request, _ []byte) (proto.Message, []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		callCount++
+		if callCount == 1 {
+			data := expectedData[:4]
+			return &pb.DownloadResponse{
+				Result:   pb.DownloadResponse_SUCCESS,
+				Filesize: uint64(len(data)),
+			}, data
+		}
+		return &pb.DownloadResponse{
+			Result:   pb.DownloadResponse_SUCCESS,
+			Filesize: uint64(len(expectedData)),
+		}, expectedData
+	})
+	defer srv.close()
+	client := newTestClient(t, srv)
+
+	buf := make([]byte, len(expectedData))
+	_, err := client.DownloadChunk(context.Background(), "file.bin", "", 0, buf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected chunk size")
+
+	n, err := client.DownloadChunk(context.Background(), "file.bin", "", 0, buf)
+	require.NoError(t, err)
+	assert.Equal(t, expectedData, buf[:n])
+	assert.Equal(t, int64(2), srv.accepted.Load())
+}
+
+func TestDownloadChunkRejectsShortResponseWithValidChecksum(t *testing.T) {
+	data := []byte("1234")
+	srv := newMockServerAt(t, "127.0.0.1:0", func(_ *pb.Request, _ []byte) (proto.Message, []byte) {
+		return &pb.DownloadResponse{
+			Result:   pb.DownloadResponse_SUCCESS,
+			Filesize: uint64(len(data)),
+			Metadata: metadataWithChecksum(nil, data),
+		}, data
+	})
+	defer srv.close()
+
+	client, err := New(
+		WithServerList([]string{srv.addr}),
+		WithCachePrefix("test/container"),
+		WithChunkSize(8),
+		WithChecksumVerification(true),
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	_, err = client.DownloadChunk(context.Background(), "file.bin", "", 0, make([]byte, 8))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected chunk size: expected 8, received 4")
+}
+
+func TestDownloadWithSizeRejectsShortResponseBeforeWriting(t *testing.T) {
+	data := []byte("1234")
+	srv := newMockServerAt(t, "127.0.0.1:0", func(_ *pb.Request, _ []byte) (proto.Message, []byte) {
+		return &pb.DownloadResponse{
+			Result:   pb.DownloadResponse_SUCCESS,
+			Filesize: uint64(len(data)),
+		}, data
+	})
+	defer srv.close()
+	client := newTestClient(t, srv)
+
+	var output bytes.Buffer
+	_, err := client.DownloadWithSize(context.Background(), "file.bin", 8, &output)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected chunk size: expected 8, received 4")
+	assert.Empty(t, output.Bytes())
 }
 
 func TestDownloadNotFound(t *testing.T) {
