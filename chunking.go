@@ -338,6 +338,11 @@ func (c *Client) downloadSingleChunkToWriter(ctx context.Context, plan chunkPlan
 		return nil, err
 	}
 
+	if err := validateDownloadSize(plan.size, resp.Filesize); err != nil {
+		c.connMgr.discardConn(cn)
+		return nil, err
+	}
+
 	// Read file data using splice-capable path
 	n, err := cn.recvDataToWriter(w, int64(resp.Filesize))
 	if err != nil {
@@ -391,10 +396,15 @@ func (c *Client) downloadSingleChunkToBuffer(ctx context.Context, plan chunkPlan
 		return 0, nil, err
 	}
 
+	if err := validateDownloadSize(plan.size, resp.Filesize); err != nil {
+		c.connMgr.discardConn(cn)
+		return 0, nil, err
+	}
+
 	dataSize := int(resp.Filesize)
 	if dataSize > len(buf) {
 		c.connMgr.discardConn(cn)
-		return 0, nil, fmt.Errorf("chunk too large: %d > buffer %d", dataSize, len(buf))
+		return 0, nil, fmt.Errorf("chunk size %d exceeds buffer size %d", dataSize, len(buf))
 	}
 
 	if err := cn.recvDataToBuffer(buf[:dataSize]); err != nil {
@@ -410,6 +420,13 @@ func (c *Client) downloadSingleChunkToBuffer(ctx context.Context, plan chunkPlan
 		}
 	}
 	return dataSize, metadata, nil
+}
+
+func validateDownloadSize(expected int64, received uint64) error {
+	if expected < 0 || received != uint64(expected) {
+		return fmt.Errorf("unexpected chunk size: expected %d, received %d", expected, received)
+	}
+	return nil
 }
 
 // Helper: convert upload response result to error.

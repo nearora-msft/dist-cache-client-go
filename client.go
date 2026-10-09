@@ -247,6 +247,8 @@ func (c *Client) DownloadWithSizePartial(ctx context.Context, filename, etag str
 // DownloadChunk retrieves a single chunk at the given offset.
 // When chunkSize-aligned, this is a 1:1 mapping to one distributed cache entry.
 // Ideal for block_cache integration where each ReadInBuffer = one chunk.
+// The buffer length is the exact expected chunk size; responses with a
+// different size are rejected.
 func (c *Client) DownloadChunk(ctx context.Context, filename, etag string, offset int64, buf []byte, opts ...DownloadOption) (int, error) {
 	if err := c.checkClosed(); err != nil {
 		return 0, err
